@@ -68,7 +68,7 @@ def train():
     train_dir = Path(FLAGS.train_dir) / "best"
     train_dir.mkdir(parents=True, exist_ok=True)
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=(train_dir / (FLAGS.model_architecture + "_{val_accuracy:.3f}_ckpt")),
+        filepath=(train_dir / (FLAGS.model_architecture + "_{val_accuracy:.3f}_ckpt.weights.h5")),
         save_weights_only=True,
         monitor='val_accuracy',
         mode='max',

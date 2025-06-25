@@ -284,11 +284,16 @@ def create_ds_cnn_model(model_settings, model_size_info):
         conv_sf[layer_no] = model_size_info[i]
         i += 1
 
-    inputs = tf.keras.Input(shape=(model_settings['fingerprint_size']), name='input')
+    #inputs = tf.keras.Input(shape=(model_settings['fingerprint_size']), name='input')
+    fingerprint_size = int(model_settings['fingerprint_size'])
+    input_shape = (fingerprint_size,)
+    inputs = tf.keras.Input(shape=input_shape, name='input')
 
     # Reshape the flattened input.
-    x = tf.reshape(inputs, shape=(-1, input_time_size, input_frequency_size, 1))
-
+	# x = tf.reshape(inputs, shape=(-1, input_time_size, input_frequency_size, 1))
+    reshape_layer = tf.keras.layers.Reshape((input_time_size, input_frequency_size,1))
+    x = reshape_layer(inputs)
+    
     # Depthwise separable convolutions.
     for layer_no in range(0, num_layers):
         if layer_no == 0:
@@ -319,7 +324,10 @@ def create_ds_cnn_model(model_settings, model_size_info):
     x = tf.keras.layers.AveragePooling2D(pool_size=(t_dim, f_dim), strides=1)(x)
 
     # Squeeze before passing to output fully connected layer.
-    x = tf.reshape(x, shape=(-1, conv_feat[layer_no]))
+    #x = tf.reshape(x, shape=(-1, conv_feat[layer_no]))
+    reshape_layer2 = tf.keras.layers.Reshape((conv_feat[layer_no],))
+    x = reshape_layer2(x)
+
 
     # Output connected layer.
     output = tf.keras.layers.Dense(units=label_count, activation='softmax')(x)
