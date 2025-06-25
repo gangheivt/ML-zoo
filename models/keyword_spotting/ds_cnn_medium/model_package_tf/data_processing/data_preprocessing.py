@@ -317,9 +317,9 @@ class AudioProcessor:
 
             filepath, _ = urllib.request.urlretrieve(data_url, filepath, _report_hook)
             print()
+            print(f'Untarring {filename}...')
+            tarfile.open(filepath, 'r:gz').extractall(target_directory)
 
-        print(f'Untarring {filename}...')
-        tarfile.open(filepath, 'r:gz').extractall(target_directory)
 
     def _prepare_datasets(self, silence_percentage, unknown_percentage, wanted_words,
                           validation_percentage, testing_percentage):
