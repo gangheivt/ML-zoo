@@ -32,6 +32,7 @@ from enum import Enum
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops import gen_audio_ops as audio_ops
+from data_processing import audio_preprocessor
 
 MAX_NUM_WAVS_PER_CLASS = 2**27 - 1  # ~134M
 RANDOM_SEED = 59185
@@ -40,7 +41,6 @@ SILENCE_LABEL = '_silence_'
 SILENCE_INDEX = 0
 UNKNOWN_WORD_INDEX = 1
 UNKNOWN_WORD_LABEL = '_unknown_'
-
 
 def load_wav_file(wav_filename, desired_samples):
     """Loads and then decodes a given 16bit PCM wav file.
@@ -139,10 +139,88 @@ def prepare_words_list(wanted_words):
     """
     return [SILENCE_LABEL, UNKNOWN_WORD_LABEL] + wanted_words
 
+def generate_features(
+    audio_pp: audio_preprocessor.AudioPreprocessor, samples, window_size, window_stride, num_mfcc) -> tf.Tensor:
+    """
+    在图模式下生成音频特征（返回tf.Tensor）
+    
+    Args:
+        audio_pp: AudioPreprocessor实例
+        
+    Returns:
+        tf.Tensor: 形状为(num_frames,num_mfcc)的特征张量
+    """   
+    max_value = tf.dtypes.int16.max
+    min_value = tf.dtypes.int16.min
+    samples = ((samples * max_value) + (-min_value + 0.5)) + min_value
+    samples = tf.cast(samples, tf.int16)  # type: ignore
 
+    # 提取参数
+    params = audio_pp.params
+
+    # 计算帧数（动态计算，兼容不同长度音频）
+    num_frames = (tf.shape(samples)[0] - window_size) // window_stride + 1    
+
+    # 创建动态张量存储特征
+    features = tf.TensorArray(
+        dtype=tf.int8,
+        size=num_frames,
+        element_shape=(num_mfcc,)
+    )
+    
+    # 重置音频预处理
+    audio_pp.reset_tflm()
+    
+    # 使用tf.while_loop替代Python循环
+    start_index = tf.constant(0, dtype=tf.int32)
+    end_index = tf.constant(window_size, dtype=tf.int32)
+    frame_number = tf.constant(0, dtype=tf.int32)
+    
+    def loop_condition(frame_num, start_idx, end_idx, feat_array):
+        return tf.logical_and(
+            tf.less_equal(end_idx, tf.shape(samples)[0]),
+            tf.less(frame_num, num_frames)
+)
+    
+    def loop_body(frame_num, start_idx, end_idx, feat_array):
+        # 提取帧并转换为张量
+        frame_tensor = tf.reshape(samples, [-1])
+        frame_tensor = tf.slice(frame_tensor, [start_idx], [window_size])
+        frame_tensor = tf.reshape(frame_tensor, [1, window_size]) 
+        
+        # 生成特征（假设返回形状为[1, 10]）
+        feature_tensor = audio_pp.generate_feature(frame_tensor)
+        
+        feat_array = feat_array.write(frame_num, feature_tensor)
+        
+        # 更新索引
+        start_idx += window_stride
+        end_idx += window_stride
+        frame_num += 1
+        
+        return frame_num, start_idx, end_idx, feat_array
+    
+    # 执行循环
+    _, _, _, features_array = tf.while_loop(
+        loop_condition,
+        loop_body,
+        [frame_number, start_index, end_index, features],
+        parallel_iterations=1
+    )
+    
+    # 转换为张量
+    features_tensor = features_array.stack()
+    
+    return features_tensor
+
+@tf.function
+def process_audio_with_features(audio_pp, samples, window_size, window_stride, num_mfcc):
+    return generate_features(audio_pp, samples, window_size, window_stride, num_mfcc)
+    
 class AudioProcessor:
     """Handles loading, partitioning, and preparing audio training data."""
 
+    audio_pp = audio_preprocessor.AudioPreprocessor(audio_preprocessor.FeatureParams())
     class Modes(Enum):
         TRAINING = 1
         VALIDATION = 2
@@ -161,7 +239,12 @@ class AudioProcessor:
         self._download_and_extract_data(data_url, data_dir)
         self._prepare_datasets(silence_percentage, unknown_percentage, wanted_words,
                                validation_percentage, testing_percentage)
-        self._prepare_background_data()
+        self._prepare_background_data()       
+        feature_params = audio_preprocessor.FeatureParams()
+        feature_params.window_size_ms=model_settings['window_size_samples']*1000/model_settings['sample_rate'];
+        feature_params.window_stride_ms=model_settings['window_stride_samples']*1000/model_settings['sample_rate'];
+        feature_params.filter_bank_number_of_channels=model_settings['dct_coefficient_count'];
+        AudioProcessor.audio_pp = audio_preprocessor.AudioPreprocessor(feature_params)
 
     def get_data(self, mode, background_frequency=0, background_volume_range=0, time_shift=0):
         """Returns the train, validation or test set for KWS as a TF Dataset.
@@ -237,7 +320,6 @@ class AudioProcessor:
         Returns:
             Tuple of calculated flattened mfcc and its class label.
         """
-
         desired_samples = model_settings['desired_samples']
         audio, sample_rate = load_wav_file(path, desired_samples=desired_samples)
 
@@ -282,11 +364,17 @@ class AudioProcessor:
         background_add = tf.add(background_mul, sliced_foreground)
         background_clamp = tf.clip_by_value(background_add, -1.0, 1.0)
 
+        """
         mfcc = calculate_mfcc(background_clamp, sample_rate, model_settings['window_size_samples'],
                               model_settings['window_stride_samples'],
                               model_settings['dct_coefficient_count'])
-        mfcc = tf.reshape(mfcc, [-1])
+        """
+        mfcc = process_audio_with_features(AudioProcessor.audio_pp,background_clamp, 
+            model_settings['window_size_samples'], 
+            model_settings['window_stride_samples'],
+            model_settings['dct_coefficient_count'])
 
+        mfcc = tf.reshape(mfcc, [-1])
         return mfcc, label
 
     def _download_and_extract_data(self, data_url, target_directory):
